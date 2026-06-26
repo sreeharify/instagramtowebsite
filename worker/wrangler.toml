@@ -1,0 +1,7 @@
+name = "instagram-wedding-proxy"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+# After deploying, set your key with:
+# wrangler secret put RAPIDAPI_KEY
+# Then paste: 95958a4567msh8e9794ecb1a9ce1p183c10jsnb2bf500535b3
