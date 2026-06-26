@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
-function GalleryImage({ src, width, height, onLoad }) {
+// Images are served via /proxy on the Worker — no direct CDN calls needed
+function GalleryImage({ src, onLoad }) {
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(false)
 
@@ -11,7 +12,7 @@ function GalleryImage({ src, width, height, onLoad }) {
 
   const handleError = () => {
     setError(true)
-    onLoad() // still count as "done" so loading screen doesn't hang
+    onLoad() // still mark done so loading screen doesn't hang
   }
 
   if (error) {
@@ -28,7 +29,6 @@ function GalleryImage({ src, width, height, onLoad }) {
       <img
         src={src}
         alt="Wedding photography"
-        loading="lazy"
         onLoad={handleLoad}
         onError={handleError}
         style={{ display: loaded ? 'block' : 'none' }}
@@ -44,8 +44,6 @@ export default function GalleryGrid({ images, onImageLoad }) {
         <GalleryImage
           key={i}
           src={img.url}
-          width={img.width}
-          height={img.height}
           onLoad={onImageLoad}
         />
       ))}
