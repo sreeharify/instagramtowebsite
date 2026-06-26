@@ -1,6 +1,5 @@
-// Cloudflare Worker — Instagram Posts + Image Proxy via RapidAPI
-// All image requests go through RapidAPI (shows in your dashboard ✓)
-// RAPIDAPI_KEY must be set as a Worker secret: wrangler secret put RAPIDAPI_KEY
+// Cloudflare Worker — Instagram Posts + Image Proxy
+// RAPIDAPI_KEY must be set: wrangler secret put RAPIDAPI_KEY
 
 const RAPIDAPI_HOST = 'instagram120.p.rapidapi.com';
 const RAPIDAPI_BASE = `https://${RAPIDAPI_HOST}`;
@@ -11,14 +10,6 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-function rapidHeaders(apiKey) {
-  return {
-    'x-rapidapi-key': apiKey,
-    'x-rapidapi-host': RAPIDAPI_HOST,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0',
-  };
-}
-
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -28,7 +19,7 @@ export default {
     const url = new URL(request.url);
 
     // ── /proxy?url=ENCODED_URL ────────────────────────────────────────────
-    // Fetches any image through RapidAPI (url_wrapped paths need the API key)
+    // Smart proxy: uses RapidAPI key for RapidAPI URLs, browser headers for CDN
     if (url.pathname === '/proxy') {
       const targetUrl = url.searchParams.get('url');
       if (!targetUrl) {
@@ -36,12 +27,29 @@ export default {
       }
 
       try {
-        const imgRes = await fetch(targetUrl, {
-          headers: rapidHeaders(env.RAPIDAPI_KEY),
-        });
+        // Only send RapidAPI auth to RapidAPI endpoints — NOT to Instagram CDN
+        const isRapidAPI = targetUrl.includes('rapidapi.com');
+        const fetchHeaders = isRapidAPI
+          ? {
+              'x-rapidapi-key': env.RAPIDAPI_KEY,
+              'x-rapidapi-host': RAPIDAPI_HOST,
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0',
+            }
+          : {
+              // For Instagram CDN — mimic a browser loading from instagram.com
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+              'Referer': 'https://www.instagram.com/',
+              'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'sec-fetch-dest': 'image',
+              'sec-fetch-mode': 'no-cors',
+              'sec-fetch-site': 'cross-site',
+            };
+
+        const imgRes = await fetch(targetUrl, { headers: fetchHeaders });
 
         if (!imgRes.ok) {
-          return new Response('Image fetch failed: ' + imgRes.status, {
+          return new Response(`Image fetch failed: ${imgRes.status}`, {
             status: imgRes.status,
             headers: CORS,
           });
@@ -62,7 +70,6 @@ export default {
     }
 
     // ── /api/instagram?username=X ─────────────────────────────────────────
-    // Fetches posts and returns proxied image URLs (all go through RapidAPI)
     if (url.pathname === '/api/instagram') {
       const username = url.searchParams.get('username');
       if (!username) {
@@ -74,7 +81,8 @@ export default {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...rapidHeaders(env.RAPIDAPI_KEY),
+            'x-rapidapi-key': env.RAPIDAPI_KEY,
+            'x-rapidapi-host': RAPIDAPI_HOST,
           },
           body: JSON.stringify({ username, maxId: '' }),
         });
@@ -91,20 +99,18 @@ export default {
           return json({ error: 'No posts found. Make sure the account is public.' }, 404);
         }
 
+        const workerBase = `${url.protocol}//${url.host}`;
         const images = [];
 
         for (const edge of edges) {
           const node = edge.node;
-
-          // Carousel posts — grab every slide
           if (node.carousel_media?.length > 0) {
             for (const slide of node.carousel_media) {
-              const img = bestImage(slide, url.origin);
+              const img = pickImage(slide, workerBase);
               if (img) images.push(img);
             }
           } else {
-            // Single photo or video thumbnail
-            const img = bestImage(node, url.origin);
+            const img = pickImage(node, workerBase);
             if (img) images.push(img);
           }
         }
@@ -128,31 +134,23 @@ function json(obj, status = 200) {
   });
 }
 
-// Pick the best image candidate and build a proxied URL through RapidAPI.
-// url_wrapped paths like "/api/instagram/get?__sig=...&uri=..." are served
-// by instagram120.p.rapidapi.com and count as RapidAPI requests ✓
-function bestImage(node, workerOrigin) {
+function pickImage(node, workerBase) {
   const candidates = node?.image_versions2?.candidates || [];
-  if (candidates.length === 0) return null;
+  if (!candidates.length) return null;
 
-  // Prefer url_wrapped (goes through RapidAPI) → falls back to direct url
-  // Pick the highest resolution candidate that has a wrapped version
+  // Prefer url_wrapped (goes via RapidAPI CDN) — fall back to direct CDN url
   const withWrapped = candidates.filter(c => c.url_wrapped);
-  const pick = withWrapped[0] || candidates[0]; // first = highest res
-
+  const pick = withWrapped[0] || candidates[0];
   if (!pick) return null;
 
-  // Build full RapidAPI URL from url_wrapped relative path
-  const rapidApiImageUrl = pick.url_wrapped
-    ? `${RAPIDAPI_BASE}${pick.url_wrapped}`
-    : pick.url;
+  // Build the actual image URL — prefer url_wrapped (served by RapidAPI)
+  const imageUrl = pick.url_wrapped
+    ? `${RAPIDAPI_BASE}${pick.url_wrapped}`  // e.g. https://instagram120.p.rapidapi.com/api/instagram/get?__sig=...
+    : pick.url;                               // fallback: direct Instagram CDN URL
 
-  // Return a proxied URL so the browser fetches via our Worker
-  // (which adds the x-rapidapi-key header automatically)
-  const proxied = `${workerOrigin}/proxy?url=${encodeURIComponent(rapidApiImageUrl)}`;
-
+  // Always route through /proxy so the Worker adds appropriate headers
   return {
-    url: proxied,           // what the <img> tag uses
+    url: `${workerBase}/proxy?url=${encodeURIComponent(imageUrl)}`,
     width: pick.width,
     height: pick.height,
   };
